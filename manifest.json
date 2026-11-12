@@ -2,9 +2,9 @@
   "author": "Mohammad Amir Nazarpour",
   "authorUrl": "",
   "description": "Two-way Backup and Sync with FTP server",
-  "id": "ftp-sync",
+  "id": "ftpsync",
   "isDesktopOnly": true,
   "minAppVersion": "0.15.0",
-  "name": "FTP Sync / Backup",
+  "name": "FTP Sync Backup",
   "version": "1.5.0"
 }
