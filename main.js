@@ -1,22 +1,5 @@
-/* FTP Sync / Backup for Obsidian - v1.3.3
- * FIX v1.3.3: رفع سینک نشدن .obsidian و .trash — vault.getFiles() این دو پوشه را برنمی‌گرداند، باید با adapter.list خوانده شوند.
- * FIX v1.3.3 (CRITICAL): رفع حذف/آپلود تکراری به خاطر هدرهای LIST -R با اسم فارسی طولانی + پوشه فانتوم /
- * علت: parseListLine fallback هر خط 9 کلمه‌ای را فایل حساب می‌کرد، هدرهای فارسی طولانی (مثل .../کتاب الإیمان و الکفر 1:) به عنوان فایل بریده‌شده 'الکفر 1:' فهمیده می‌شدند و هر سینک پاک + آپلود دوباره می‌شدند.
- * FIX v1.3.3 (CRITICAL): رفع باگ LIST -R — سرورها بلاک ریشه را بدون هدر می‌فرستند، پارسر قبلی آن را دور می‌ریخت و 12 پوشه + 10 فایل ریشه را «نبود» حساب می‌کرد و دوباره می‌ساخت.
- * حالا: بلاک بدون هدر = ریشه، هدرهای نسبی هم پشتیبانی می‌شوند، و لیست ریشه جداگانه هم merge می‌شود تا ریشه هیچ‌وقت گم نشود.
- * FIX v1.3.3:
- *  - لاگ زنده: بدون دکمه به‌روزرسانی، لاگ در تنظیمات خودش سینک می‌شود
- *  - پسورد دیگر در data.json به صورت متن ساده نیست (SafeStorage / AES-GCM)
- *  - چک اولیه سریع به سبک rclone: LIST -R یک‌باره + اسم+حجم، بدون MDTM برای هر فایل + getFiles() محلی
- * FIX v1.2.0:
- *  - حذف دکمه بیخود به‌روزرسانی وضعیت
- *  - دکمه توقف همیشه فعال (بدون نیاز به رفرش تنظیمات)
- *  - حذف متن اضافی نوار وضعیت ("برای توقف از تنظیمات...")
- *  - رفع لوپ کپی دوباره: منطق mtime درست + حافظه سینک (syncState)
- *    علت لوپ قبلی: بعد از آپلود سرور mtime را با MDTM ست نمی‌کرد، زمان سرور جدیدتر از محلی می‌شد
- *    و منطق قبلی با |اختلاف| فکر می‌کرد فایل عوض شده و دوباره آپلود می‌کرد.
- *    حالا در mirror-upload فقط وقتی محلی جدیدتر باشد آپلود می‌شود، و syncState جلوی آپلود تکراری را می‌گیرد.
- * FIX v1.1.0: رفع تایم‌اوت بعد از 2-3 دقیقه (KeepAlive + تایم‌اوت قابل تنظیم + تلاش مجدد)
+/* FTP Sync / Backup for Obsidian - v1.4.0
+ * Multi-language support (Persian & English)
  */
 
 const { Plugin, PluginSettingTab, Setting, Notice, Modal } = require('obsidian');
@@ -28,11 +11,209 @@ try { _fs = require('fs'); } catch (e) {}
 try { _path = require('path'); } catch (e) {}
 try { _crypto = require('crypto'); } catch (e) {}
 
+// ---------- دیکشنری دوزبانه (i18n) ----------
+const TRANSLATIONS = {
+  fa: {
+    ribbonTitle: 'FTP Sync — همگام‌سازی (کلیک دوباره = توقف)',
+    cmdSyncNow: 'FTP Sync: همگام‌سازی اکنون',
+    cmdShowLog: 'FTP Sync: نمایش لاگ',
+    cmdTestConn: 'FTP Sync: تست اتصال',
+    cmdStopSync: 'FTP Sync: توقف سینک',
+    noticeNoSyncRunning: 'سینکی در حال انجام نیست.',
+    noticeStoppingSync: 'در حال توقف سینک…',
+    noticeSyncStopped: 'سینک متوقف شد ⏹️',
+    noticeEnterHostUser: 'ابتدا هاست و نام کاربری را وارد کنید.',
+    noticeNoPassword: 'رمز عبور ذخیره نشده است. در تنظیمات رمز را وارد کنید.',
+    noticeTestingConn: 'در حال تست اتصال FTP…',
+    noticeConnSuccess: (root, count) => `اتصال موفق ✅ پوشه ${root}: ${count} مورد`,
+    noticeConnFailed: (err) => `تست اتصال ناموفق: ${err}`,
+    noticeSyncRunningWait: 'سینک در حال انجام است… برای توقف از تنظیمات یا ریبون استفاده کنید.',
+    noticeIncompleteSettings: 'تنظیمات FTP کامل نیست.',
+    noticePasswordCleared: 'رمز عبور پاک شد.',
+    noticeSyncComplete: (up, down, del) => `FTP Sync کامل شد ✅ آپلود: ${up} دانلود: ${down} حذف: ${del}`,
+    noticeSyncError: (err) => `خطای FTP Sync: ${err}`,
+    statusStopping: 'FTP • در حال توقف…',
+    statusSyncingPct: (pct, done, total) => `FTP • ${pct}% (${done}/${total})`,
+    statusSyncing: 'FTP • در حال سینک…',
+    statusLastSync: (dateStr) => `FTP • آخرین سینک: ${dateStr}`,
+    statusNeverSynced: 'FTP • هرگز سینک نشده',
+    modalLogTitle: 'لاگ FTP Sync',
+    modalNoLogs: 'لاگی وجود ندارد.',
+    modalClearLog: 'پاک کردن لاگ',
+    modalLogCleared: 'لاگ پاک شد.',
+    modalClose: 'بستن',
+    settingsTitle: 'FTP Sync / Backup — تنظیمات',
+    settingsDesc: 'فقط روی Obsidian دسکتاپ کار می‌کند. پسورد به صورت رمزنگاری‌شده ذخیره می‌شود و در فایل data.json قابل خواندن نیست.',
+    langName: 'زبان / Language',
+    langDesc: 'زبان رابط کاربری و تنظیمات را انتخاب کنید / Choose interface language',
+    hostName: 'هاست FTP',
+    hostDesc: 'مثال: ftp.example.com یا IP سرور',
+    portName: 'پورت',
+    portDesc: 'پیش‌فرض FTP: 21 ، FTPS Implicit: 990',
+    userName: 'نام کاربری',
+    passName: 'رمز عبور',
+    passDescSaved: 'رمز عبور ذخیره شده و رمزنگاری‌شده است (در data.json قابل خواندن نیست). برای تغییر، رمز جدید را بنویسید. خالی گذاشتن یعنی نگه داشتن رمز قبلی.',
+    passDescNotSaved: 'رمز عبور را وارد کنید — به صورت رمزنگاری‌شده ذخیره می‌شود و در data.json قابل خواندن نیست.',
+    passPlaceholderSaved: '•••••• (ذخیره شده)',
+    passPlaceholderEmpty: 'رمز عبور',
+    clearPassName: 'پاک کردن رمز ذخیره‌شده',
+    clearPassDesc: 'رمز عبور را از حافظه و فایل تنظیمات پاک می‌کند.',
+    clearPassBtn: 'پاک کردن رمز',
+    protoName: 'پروتکل',
+    protoDesc: 'اگر سرورتان FTPS پشتیبانی می‌کند، Explicit را انتخاب کنید.',
+    protoOptFtp: 'FTP (بدون رمزنگاری)',
+    protoOptExplicit: 'FTPS Explicit (پیشنهادی)',
+    protoOptImplicit: 'FTPS Implicit (پورت 990)',
+    remotePathName: 'پوشه مقصد در سرور FTP',
+    remotePathDesc: 'مثال: /obsidian-backup — اگر وجود نداشته باشد ساخته می‌شود.',
+    localFolderName: 'پوشه محلی برای سینک',
+    localFolderDesc: 'خالی = کل والت. مثال: Notes/Work',
+    localFolderPlaceholder: 'خالی = کل والت',
+    syncModeName: 'حالت سینک',
+    syncModeDesc: 'میرور آپلود: والت → سرور. دوطرفه: جدیدترین برنده است. میرور دانلود: سرور → والت.',
+    syncModeUpload: 'میرور آپلود — بک‌آپ به سرور (محلی → سرور)',
+    syncModeTwoWay: 'دوطرفه — جدیدترین فایل برنده است',
+    syncModeDownload: 'میرور دانلود — از سرور به والت (سرور → محلی)',
+    checkSpeedName: 'سرعت چک اولیه',
+    checkSpeedDesc: 'سریع (پیش‌فرض، مثل rclone): فقط اسم + حجم چک می‌شود، بدون MDTM برای هر فایل — چک اولیه 1340 فایل در چند ثانیه. دقیق: سایز + زمان تغییر + MDTM — کندتر ولی اگر فایلی را بدون تغییر سایز ویرایش کنی هم می‌فهمد.',
+    checkSpeedFast: 'سریع — اسم + حجم (مثل rclone)',
+    checkSpeedPrecise: 'دقیق — سایز + زمان + MDTM',
+    delOrphanName: 'حذف فایل‌های اضافی در حالت میرور',
+    delOrphanDesc: 'اگر روشن باشد، در حالت میرور فایل‌هایی که در طرف مبدأ نیستند از طرف مقصد حذف می‌شوند.',
+    secSysFolders: 'پوشه‌های سیستمی — انتخابی',
+    syncObsidianName: 'سینک پوشه .obsidian',
+    syncObsidianDesc: 'خاموش = پیش‌فرض، .obsidian سینک نمی‌شود. روشن = تنظیمات و تم و پلاگین‌ها هم سینک می‌شوند. پوشه خود این افزونه هرگز سینک نمی‌شود تا لوپ نشود.',
+    syncTrashName: 'سینک پوشه .trash',
+    syncTrashDesc: 'خاموش = پیش‌فرض. روشن = فایل‌های داخل .trash هم سینک می‌شوند.',
+    secConnStability: 'پایداری اتصال — رفع تایم‌اوت',
+    timeoutName: 'تایم‌اوت هر دستور (ثانیه)',
+    timeoutDesc: 'پیش‌فرض 120. اگر والت بزرگ است یا اینترنت کند است، بگذارید 300.',
+    keepAliveName: 'فاصله KeepAlive (ثانیه)',
+    keepAliveDesc: 'هر چند ثانیه NOOP بفرستد تا اتصال قطع نشود. پیش‌فرض 30.',
+    retriesName: 'تعداد تلاش مجدد در صورت قطعی',
+    retriesDesc: 'اگر وسط سینک قطع شود، چند بار وصل شود و از همان فایل ادامه دهد. پیش‌فرض 2.',
+    autoSyncName: 'سینک خودکار — هر چند دقیقه؟',
+    autoSyncDesc: '0 = خاموش. مثال: 15 یعنی هر 15 دقیقه.',
+    autoSyncStartupName: 'سینک هنگام باز شدن Obsidian',
+    testAndSyncName: 'تست و سینک',
+    testAndSyncDesc: 'ابتدا تست اتصال را بزنید، بعد سینک کنید.',
+    btnTestConn: 'تست اتصال',
+    btnSyncNow: 'سینک اکنون',
+    btnShowLog: 'نمایش لاگ',
+    stopSyncName: 'توقف سینک',
+    stopSyncDescRunning: 'سینک در حال انجام است — برای توقف کلیک کنید.',
+    stopSyncDescIdle: 'اگر سینکی در حال انجام باشد، با این دکمه متوقفش کنید. نیازی به رفرش تنظیمات نیست.',
+    btnStopSync: '⏹️ توقف سینک',
+    secLiveLog: 'لاگ سینک — زنده',
+    liveLogNote: 'لاگ به صورت زنده سینک می‌شود، نیازی به دکمه به‌روزرسانی نیست. حین سینک همینجا خط‌به‌خط می‌آید.',
+    noLogsYet: 'هنوز لاگی وجود ندارد.',
+    btnClearLog: 'پاک کردن لاگ',
+    lastSyncText: (dateStr) => `آخرین سینک: ${dateStr}`,
+    neverSyncedText: 'هنوز سینکی انجام نشده است.',
+    bottomNote: 'نکته: نوار وضعیت پایین راست همیشه آخرین سینک را نشان می‌دهد و حین سینک درصد پیشرفت را نمایش می‌دهد.'
+  },
+  en: {
+    ribbonTitle: 'FTP Sync — Synchronize (Click again to Stop)',
+    cmdSyncNow: 'FTP Sync: Sync now',
+    cmdShowLog: 'FTP Sync: Show log',
+    cmdTestConn: 'FTP Sync: Test connection',
+    cmdStopSync: 'FTP Sync: Stop sync',
+    noticeNoSyncRunning: 'No sync in progress.',
+    noticeStoppingSync: 'Stopping sync…',
+    noticeSyncStopped: 'Sync stopped ⏹️',
+    noticeEnterHostUser: 'Please enter FTP host and username first.',
+    noticeNoPassword: 'Password not set. Enter password in settings.',
+    noticeTestingConn: 'Testing FTP connection…',
+    noticeConnSuccess: (root, count) => `Connected successfully ✅ Folder ${root}: ${count} items`,
+    noticeConnFailed: (err) => `Connection failed: ${err}`,
+    noticeSyncRunningWait: 'Sync already in progress… Click Ribbon or Settings button to stop.',
+    noticeIncompleteSettings: 'FTP settings are incomplete.',
+    noticePasswordCleared: 'Password cleared.',
+    noticeSyncComplete: (up, down, del) => `FTP Sync completed ✅ Uploaded: ${up} Downloaded: ${down} Deleted: ${del}`,
+    noticeSyncError: (err) => `FTP Sync error: ${err}`,
+    statusStopping: 'FTP • Stopping…',
+    statusSyncingPct: (pct, done, total) => `FTP • ${pct}% (${done}/${total})`,
+    statusSyncing: 'FTP • Syncing…',
+    statusLastSync: (dateStr) => `FTP • Last sync: ${dateStr}`,
+    statusNeverSynced: 'FTP • Never synced',
+    modalLogTitle: 'FTP Sync Log',
+    modalNoLogs: 'No logs available.',
+    modalClearLog: 'Clear Log',
+    modalLogCleared: 'Log cleared.',
+    modalClose: 'Close',
+    settingsTitle: 'FTP Sync / Backup — Settings',
+    settingsDesc: 'Works on Obsidian Desktop only. Password is encrypted and never stored in plain text in data.json.',
+    langName: 'Language / زبان',
+    langDesc: 'Choose interface language / زبان رابط کاربری را انتخاب کنید',
+    hostName: 'FTP Host',
+    hostDesc: 'e.g. ftp.example.com or server IP',
+    portName: 'Port',
+    portDesc: 'Default FTP: 21, FTPS Implicit: 990',
+    userName: 'Username',
+    passName: 'Password',
+    passDescSaved: 'Password is saved and encrypted (unreadable in data.json). Enter new password to change. Leave empty to keep current.',
+    passDescNotSaved: 'Enter password — it will be encrypted and will not appear in plain text.',
+    passPlaceholderSaved: '•••••• (saved)',
+    passPlaceholderEmpty: 'Password',
+    clearPassName: 'Clear Saved Password',
+    clearPassDesc: 'Removes the saved password from memory and settings file.',
+    clearPassBtn: 'Clear Password',
+    protoName: 'Protocol',
+    protoDesc: 'Choose Explicit FTPS if your server supports TLS encryption.',
+    protoOptFtp: 'FTP (Plain / Insecure)',
+    protoOptExplicit: 'FTPS Explicit (Recommended)',
+    protoOptImplicit: 'FTPS Implicit (Port 990)',
+    remotePathName: 'Remote Directory on FTP',
+    remotePathDesc: 'e.g. /obsidian-backup — will be created if not exists.',
+    localFolderName: 'Local Folder to Sync',
+    localFolderDesc: 'Empty = entire vault. e.g. Notes/Work',
+    localFolderPlaceholder: 'Empty = whole vault',
+    syncModeName: 'Sync Mode',
+    syncModeDesc: 'Mirror Upload: Vault → Server. Two-way: newest wins. Mirror Download: Server → Vault.',
+    syncModeUpload: 'Mirror Upload — Backup to server (Local → Remote)',
+    syncModeTwoWay: 'Two-Way — Newest file wins',
+    syncModeDownload: 'Mirror Download — From server to vault (Remote → Local)',
+    checkSpeedName: 'Initial Check Speed',
+    checkSpeedDesc: 'Fast (Default, rclone style): checks name + size only without per-file MDTM. Precise: size + mtime + MDTM — slower, but detects in-place edits.',
+    checkSpeedFast: 'Fast — Name + Size (rclone-style)',
+    checkSpeedPrecise: 'Precise — Size + Timestamp + MDTM',
+    delOrphanName: 'Delete Orphan Files in Mirror Mode',
+    delOrphanDesc: 'If enabled, files deleted from source are also deleted from target in mirror mode.',
+    secSysFolders: 'System Folders — Optional',
+    syncObsidianName: 'Sync .obsidian Folder',
+    syncObsidianDesc: 'Disabled by default. When enabled, settings, themes, and plugins sync too. The ftp-sync plugin directory is excluded to avoid loops.',
+    syncTrashName: 'Sync .trash Folder',
+    syncTrashDesc: 'Disabled by default. When enabled, files inside .trash are also synced.',
+    secConnStability: 'Connection Stability — Prevent Timeouts',
+    timeoutName: 'Command Timeout (seconds)',
+    timeoutDesc: 'Default 120. If vault is huge or network is slow, increase to 300.',
+    keepAliveName: 'KeepAlive Interval (seconds)',
+    keepAliveDesc: 'Seconds between NOOP signals to prevent idle timeouts. Default 30.',
+    retriesName: 'Max Reconnect Retries',
+    retriesDesc: 'Retry count when connection drops mid-sync. Continues where it left off. Default 2.',
+    autoSyncName: 'Auto Sync Interval (minutes)',
+    autoSyncDesc: '0 = Disabled. e.g. 15 = syncs every 15 minutes.',
+    autoSyncStartupName: 'Sync on Obsidian Startup',
+    testAndSyncName: 'Test & Sync',
+    testAndSyncDesc: 'Test connection first, then start sync.',
+    btnTestConn: 'Test Connection',
+    btnSyncNow: 'Sync Now',
+    btnShowLog: 'Show Log',
+    stopSyncName: 'Stop Sync',
+    stopSyncDescRunning: 'Sync in progress — click to stop.',
+    stopSyncDescIdle: 'Stop current sync process at any time without refreshing settings.',
+    btnStopSync: '⏹️ Stop Sync',
+    secLiveLog: 'Sync Log — Live',
+    liveLogNote: 'Logs are streamed live. No refresh button needed.',
+    noLogsYet: 'No logs yet.',
+    btnClearLog: 'Clear Log',
+    lastSyncText: (dateStr) => `Last sync: ${dateStr}`,
+    neverSyncedText: 'Never synced yet.',
+    bottomNote: 'Note: Status bar shows progress during sync and last sync time when idle.'
+  }
+};
+
 // ---------- رمزنگاری پسورد (v1.3.3) ----------
-// پسورد هرگز در data.json به صورت متن ساده ذخیره نمی‌شود.
-// اولویت 1: Electron safeStorage (keychain سیستم‌عامل)
-// اولویت 2: AES-256-GCM با کلیدی که در localStorage است (نه در data.json)
-// پس data.json فقط ciphertext دارد.
 function getSafeStorage() {
   try { const el = require('electron'); if (el && el.safeStorage) return el.safeStorage; } catch (e) {}
   try { if (typeof window !== 'undefined' && window.require) { const el2 = window.require('electron'); if (el2 && el2.safeStorage) return el2.safeStorage; } } catch (e) {}
@@ -87,21 +268,19 @@ function decryptPassword(encStr) {
       decipher.setAuthTag(tag);
       return Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8');
     }
-    // legacy: اگر رشته با SAFE:/AES: شروع نشود، یعنی پسورد قدیمی به صورت متن ساده است — برای مهاجرت برمی‌گردانیم
     return encStr;
   } catch (e) { return ''; }
 }
 
 const DEFAULT_SETTINGS = {
+  language: 'fa',
   host: '', port: 21, username: '',
-  // v1.3.3: پسورد به صورت متن ساده اینجا نیست. فقط passwordEncrypted ذخیره می‌شود.
   passwordEncrypted: '',
   secure: 'ftp', remotePath: '/obsidian-backup', localFolder: '',
   syncMode: 'mirror-upload', autoSyncMinutes: 0, autoSyncOnStartup: false,
   deleteOrphan: true,
   syncObsidian: false, syncTrash: false,
   timeoutSeconds: 120, keepAliveSeconds: 30, maxRetries: 2,
-  // v1.3.3: چک سریع به سبک rclone (اسم+حجم) یا دقیق (سایز+mtime)
   checkMode: 'fast',
   syncState: {},
   lastSync: null, logs: []
@@ -145,8 +324,6 @@ function parseListLine(line) {
     const name = win[8].trim(); if (name === '.' || name === '..') return null;
     return { name, type: isDir ? 'dir' : 'file', size, mtime: new Date(y, mo, d, hh, mm).getTime() };
   }
-  // v1.3.3 FIX: fallback قبلی حذف شد — هر خط با 9 کلمه را فایل حساب می‌کرد و هدرهای LIST -R با اسم فارسی طولانی را به عنوان فایل بریده‌شده می‌فهمید.
-  // فقط خطوطی که واقعا با -/d/l شروع می‌شوند و الگوی دسترسی دارند، ورودی فایل‌اند. بقیه null‌اند تا هدرها اشتباه فهمیده نشوند.
   return null;
 }
 
@@ -313,8 +490,6 @@ class FTPClient {
     const entries = []; for (const line of lines) { const e = parseListLine(line); if (e) entries.push(e); }
     return entries;
   }
-  // v1.3.3: LIST -R — یک درخواست برای کل درخت، مثل rclone lsjson --recursive
-  // اگر سرور پشتیبانی نکند، null برمی‌گردد و کد به BFS قدیمی برمی‌گردد.
   async listRecursive(root) {
     const dataSock = await this._openDataConnection();
     const dataPromise = this._readDataSocket(dataSock);
@@ -324,19 +499,10 @@ class FTPClient {
     let data; try { data = await dataPromise; } catch (e) { return null; }
     try { await this._waitResponse2(Math.max(this.timeoutMs * 2, 120000)); } catch (e) {}
     const text = data.toString('utf8');
-    // v1.3.3 FIX: خیلی از سرورها بلاک ریشه را WITHOUT هدر می‌فرستند، مثلا:
-    //   total 100
-    //   drwx... folder1
-    //   -rw... file1.md
-    //   folder1:
-    //   total ...
-    // پارسر قبلی با if (!sawHeader) continue کل بلاک ریشه را دور می‌ریخت → 12 پوشه + 10 فایل ریشه «نبود» حساب می‌شدند و دوباره ساخته می‌شدند.
-    // حالا: currentDir از اول = root است، ورودی‌های قبل از اولین هدر هم مال ریشه‌اند. هدرهای نسبی (folder1:) هم پشتیبانی می‌شوند.
     if (!text.includes(':')) return null;
     const lines = text.split(/\r?\n/);
     const out = [];
     const rootNorm = (root || '').replace(/\/$/, '') || '/';
-    // ریشه را از اول فرض کن، نه بعد از هدر
     let currentDir = rootNorm;
     let sawAnyEntry = false;
     const resolveHeader = (hRaw) => {
@@ -344,8 +510,6 @@ class FTPClient {
       if (h.startsWith('./')) h = h.slice(2);
       if (h === '' || h === '.') return rootNorm;
       if (h.startsWith('/')) return h;
-      // هدر نسبی مثل "folder1:" یا "folder1/sub:"
-      // اگر هدر با اسم ریشه شروع شد، مثل "obsidian-backup/folder1:" → "/obsidian-backup/folder1"
       const rootBase = rootNorm === '/' ? '' : rootNorm.slice(1);
       if (rootBase && (h === rootBase || h.startsWith(rootBase + '/'))) return '/' + h;
       if (rootNorm === '/') return '/' + h;
@@ -355,8 +519,6 @@ class FTPClient {
       const line = rawLine.trimEnd();
       if (!line.trim()) continue;
       if (line.startsWith('total ')) continue;
-      // v1.3.3 FIX: هر خطی که با : تمام می‌شود و با -/d/l/total شروع نمی‌شود، هدر است — بدون اینکه به parseListLine اعتماد کنیم.
-      // چون روی ویندوز : در اسم فایل غیرمجاز است، فایل واقعی هرگز با : تمام نمی‌شود. پس این تشخیص امن است و هدرهای فارسی طولانی را دیگر به عنوان فایل نمی‌فهمد.
       if (line.endsWith(':') && !line.startsWith('-') && !line.startsWith('d') && !line.startsWith('l') && !line.startsWith('total')) {
         currentDir = resolveHeader(line);
         continue;
@@ -422,23 +584,33 @@ class FTPClient {
 
 // ---------- Plugin ----------
 class FTPSyncPlugin extends Plugin {
+  t(key, ...args) {
+    const lang = (this.settings && this.settings.language === 'en') ? 'en' : 'fa';
+    const dict = TRANSLATIONS[lang] || TRANSLATIONS.fa;
+    const val = dict[key] !== undefined ? dict[key] : (TRANSLATIONS.fa[key] !== undefined ? TRANSLATIONS.fa[key] : key);
+    if (typeof val === 'function') return val(...args);
+    return val;
+  }
+  formatDate(ts) {
+    if (!ts) return '';
+    const lang = (this.settings && this.settings.language === 'en') ? 'en' : 'fa';
+    return new Date(ts).toLocaleString(lang === 'en' ? 'en-US' : 'fa-IR');
+  }
   async onload() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, (await this.loadData()) || {});
-    // v1.3.3: مهاجرت پسورد قدیمی از متن ساده به رمزنگاری‌شده
     this._password = '';
     this.logListeners = new Set();
     try {
       if (this.settings.password) {
-        // پسورد قدیمی به صورت متن ساده در data.json بود — همین حالا رمزنگاری کن و پاکش کن
         this._password = String(this.settings.password);
         this.settings.passwordEncrypted = encryptPassword(this._password);
         delete this.settings.password;
         await this.saveData(this.settings);
       } else if (this.settings.passwordEncrypted) {
         this._password = decryptPassword(this.settings.passwordEncrypted) || '';
-        // اگر رمزنگاری قدیمی با کلید دیگری بود و باز نشد، کاربر باید دوباره وارد کند — چیزی در data.json به صورت ساده نمی‌ماند
       }
     } catch (e) { this._password = ''; }
+    if (this.settings.language !== 'en' && this.settings.language !== 'fa') this.settings.language = 'fa';
     if (this.settings.syncObsidian == null) this.settings.syncObsidian = false;
     if (this.settings.syncTrash == null) this.settings.syncTrash = false;
     if (this.settings.timeoutSeconds == null) this.settings.timeoutSeconds = 120;
@@ -449,65 +621,67 @@ class FTPSyncPlugin extends Plugin {
     this.logs = Array.isArray(this.settings.logs) ? this.settings.logs : [];
     this.isSyncing = false; this.stopRequested = false; this.autoTimer = null;
     this.statusBar = this.addStatusBarItem(); this.updateStatusBar();
-    this.addRibbonIcon('refresh-cw', 'FTP Sync — همگام‌سازی (کلیک دوباره = توقف)', async () => {
+    this.addRibbonIcon('refresh-cw', this.t('ribbonTitle'), async () => {
       if (this.isSyncing) { this.requestStop(); return; }
       await this.performSync(false);
     });
-    this.addCommand({ id: 'ftp-sync-now', name: 'FTP Sync: همگام‌سازی اکنون', callback: async () => { await this.performSync(false); } });
-    this.addCommand({ id: 'ftp-sync-show-log', name: 'FTP Sync: نمایش لاگ', callback: () => { new LogModal(this.app, this).open(); } });
-    this.addCommand({ id: 'ftp-sync-test', name: 'FTP Sync: تست اتصال', callback: async () => { await this.testConnection(); } });
-    this.addCommand({ id: 'ftp-sync-stop', name: 'FTP Sync: توقف سینک', callback: () => { this.requestStop(); } });
+    this.addCommand({ id: 'ftp-sync-now', name: this.t('cmdSyncNow'), callback: async () => { await this.performSync(false); } });
+    this.addCommand({ id: 'ftp-sync-show-log', name: this.t('cmdShowLog'), callback: () => { new LogModal(this.app, this).open(); } });
+    this.addCommand({ id: 'ftp-sync-test', name: this.t('cmdTestConn'), callback: async () => { await this.testConnection(); } });
+    this.addCommand({ id: 'ftp-sync-stop', name: this.t('cmdStopSync'), callback: () => { this.requestStop(); } });
     this.addSettingTab(new FTPSyncSettingTab(this.app, this));
     if (this.settings.autoSyncOnStartup) setTimeout(() => { this.performSync(true); }, 3500);
     this.setupAutoSync();
   }
   onunload() { this.requestStop(); if (this.autoTimer) clearInterval(this.autoTimer); }
   requestStop() {
-    if (!this.isSyncing) { new Notice('سینکی در حال انجام نیست.'); return; }
+    if (!this.isSyncing) { new Notice(this.t('noticeNoSyncRunning')); return; }
     this.stopRequested = true;
-    this.addLog('درخواست توقف سینک توسط کاربر…', 'warn');
-    new Notice('در حال توقف سینک…');
+    this.addLog(this.settings.language === 'en' ? 'Sync stop requested by user…' : 'درخواست توقف سینک توسط کاربر…', 'warn');
+    new Notice(this.t('noticeStoppingSync'));
     this.updateStatusBar();
   }
   getPassword() { return this._password || ''; }
   async setPassword(plain) {
     this._password = plain || '';
     this.settings.passwordEncrypted = plain ? encryptPassword(plain) : '';
-    // مطمئن شو هیچ‌وقت متن ساده در settings نماند
     if (this.settings.password) delete this.settings.password;
     await this.saveData(this.settings);
   }
   async clearPassword() { await this.setPassword(''); }
-  // لاگ زنده v1.3.3
   onLog(cb) { this.logListeners.add(cb); return () => { this.logListeners.delete(cb); }; }
   _notifyLogListeners() {
-    const text = this.logs.join('\n') || 'هنوز لاگی وجود ندارد.';
+    const text = this.logs.join('\n') || this.t('noLogsYet');
     for (const cb of [...this.logListeners]) { try { cb(text); } catch (e) {} }
   }
   setupAutoSync() {
     if (this.autoTimer) { clearInterval(this.autoTimer); this.autoTimer = null; }
     const mins = Number(this.settings.autoSyncMinutes) || 0;
-    if (mins > 0) { this.autoTimer = setInterval(() => { this.performSync(true); }, mins * 60 * 1000); this.addLog(`سینک خودکار فعال شد: هر ${mins} دقیقه`); }
+    if (mins > 0) {
+      this.autoTimer = setInterval(() => { this.performSync(true); }, mins * 60 * 1000);
+      const logTxt = this.settings.language === 'en' ? `Auto-sync enabled: every ${mins} minute(s)` : `سینک خودکار فعال شد: هر ${mins} دقیقه`;
+      this.addLog(logTxt);
+    }
   }
   addLog(msg, level) {
     const time = new Date(); let icon = 'ℹ️';
     if (level === 'error') icon = '❌'; if (level === 'warn') icon = '⚠️'; if (level === 'success') icon = '✅';
-    const entry = `[${time.toLocaleString('fa-IR')}] ${icon} ${msg}`;
+    const lang = (this.settings && this.settings.language === 'en') ? 'en-US' : 'fa-IR';
+    const entry = `[${time.toLocaleString(lang)}] ${icon} ${msg}`;
     this.logs.push(entry); if (this.logs.length > 300) this.logs = this.logs.slice(-300);
     this.settings.logs = this.logs; this.saveData(this.settings).catch(() => {});
     this._notifyLogListeners();
   }
   updateStatusBar(done, total) {
     if (!this.statusBar) return;
-    if (this.isSyncing && this.stopRequested) { this.statusBar.setText('FTP • در حال توقف…'); return; }
+    if (this.isSyncing && this.stopRequested) { this.statusBar.setText(this.t('statusStopping')); return; }
     if (this.isSyncing && typeof done === 'number' && typeof total === 'number') {
       const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-      this.statusBar.setText(`FTP • ${pct}% (${done}/${total})`);
-    } else if (this.isSyncing) { this.statusBar.setText('FTP • در حال سینک…'); }
-    else if (this.settings.lastSync) { this.statusBar.setText(`FTP • آخرین سینک: ${new Date(this.settings.lastSync).toLocaleString('fa-IR')}`); }
-    else { this.statusBar.setText('FTP • هرگز سینک نشده'); }
+      this.statusBar.setText(this.t('statusSyncingPct', pct, done, total));
+    } else if (this.isSyncing) { this.statusBar.setText(this.t('statusSyncing')); }
+    else if (this.settings.lastSync) { this.statusBar.setText(this.t('statusLastSync', this.formatDate(this.settings.lastSync))); }
+    else { this.statusBar.setText(this.t('statusNeverSynced')); }
   }
-  // ---- syncState helpers (v1.2.0) ----
   getState(rel) { return (this.settings.syncState || {})[rel] || null; }
   updateState(rel, localInfo, remoteInfo) {
     if (!this.settings.syncState) this.settings.syncState = {};
@@ -523,7 +697,6 @@ class FTPSyncPlugin extends Plugin {
     if (lf && st.localSize != null && lf.size !== st.localSize) return false;
     if (rf && st.remoteSize != null && rf.size !== st.remoteSize) return false;
     if (lf && st.localMtime != null && Math.abs(lf.mtime - st.localMtime) > 2000) return false;
-    // remote از LIST دقت دقیقه دارد، پس تلرانس بزرگ‌تر
     if (rf && st.remoteMtime != null && Math.abs(rf.mtime - st.remoteMtime) > 120000) return false;
     return true;
   }
@@ -552,12 +725,10 @@ class FTPSyncPlugin extends Plugin {
   isExcluded(relPath, filePath) {
     const p = (filePath || relPath || '');
     if (p === '.obsidian/plugins/ftp-sync' || p.startsWith('.obsidian/plugins/ftp-sync/')) return true;
-    // v1.3.3: فقط دقیق .obsidian و .obsidian/... — نه .obsidian-backup و امثال آن
     if (p === '.obsidian' || p.startsWith('.obsidian/')) return !this.settings.syncObsidian;
     if (p === '.trash' || p.startsWith('.trash/')) return !this.settings.syncTrash;
     return false;
   }
-  // v1.3.3: جمع‌آوری پوشه‌های خاص (.obsidian / .trash) با adapter — چون vault.getFiles() آن‌ها را برنمی‌گرداند
   async collectSpecialFolder(root, filesMap, dirsSet) {
     const adapter = this.app.vault.adapter;
     if (this.isExcluded('', root)) return;
@@ -580,13 +751,10 @@ class FTPSyncPlugin extends Plugin {
     }
   }
   async collectLocal(baseFolder, filesMap, dirsSet) {
-    // v1.3.3 — سریع به سبک rclone: به جای adapter.stat برای هر فایل، از vault.getFiles() استفاده می‌کنیم که stat را کش کرده است.
-    // این چک اولیه را از O(N) درخواست async به O(1) می‌رساند.
     const base = (baseFolder || '').replace(/^\/+|\/+$/g, '');
     try {
       const all = this.app.vault.getFiles ? this.app.vault.getFiles() : null;
       if (all && Array.isArray(all)) {
-        // v1.3.3: اول پوشه‌ها را از getAllLoadedFiles بگیر تا پوشه‌های خالی هم گم نشوند، بعد فایل‌ها را از getFiles
         try {
           const allLoaded = this.app.vault.getAllLoadedFiles ? this.app.vault.getAllLoadedFiles() : null;
           if (allLoaded && Array.isArray(allLoaded)) {
@@ -596,12 +764,8 @@ class FTPSyncPlugin extends Plugin {
               if (!fullPath) continue;
               if (base) { if (fullPath !== base && !fullPath.startsWith(base + '/')) continue; }
               if (this.isExcluded('', fullPath)) continue;
-              // TFolder: children دارد و stat ندارد (یا stat ندارد)
-              const isFolder = entry.children !== undefined || (entry.stat === undefined && entry.children !== undefined);
-              // در Obsidian، TFolder children دارد، TFile stat دارد. اگر هر دو را چک کنیم، پوشه خالی هم می‌آید.
               if (entry.children !== undefined) {
                 let rel; if (!base) rel = fullPath; else if (fullPath === base) continue; else rel = fullPath.slice(base.length + 1);
-                // v1.3.3: ریشه والت ("" یا "/") پوشه نیست — نباید به dirsSet اضافه شود تا هر دفعه MKD / نزند
                 if (!rel || rel === '/' || rel === '.') continue;
                 if (rel) dirsSet.add(rel);
               }
@@ -620,15 +784,13 @@ class FTPSyncPlugin extends Plugin {
           const parts = rel.split('/'); let cur = '';
           for (let i = 0; i < parts.length - 1; i++) { cur = cur ? cur + '/' + parts[i] : parts[i]; if (!cur || cur === '/' || cur === '.') continue; if (!this.isExcluded('', cur)) dirsSet.add(cur); }
         }
-        // v1.3.3 FIX: .obsidian و .trash در getFiles() نیستند — اگر فعال‌اند، جداگانه با adapter بخوان. فقط وقتی کل والت سینک می‌شود (base خالی).
         if (!base && !this.stopRequested) {
           if (this.settings.syncObsidian) await this.collectSpecialFolder('.obsidian', filesMap, dirsSet);
           if (this.settings.syncTrash) await this.collectSpecialFolder('.trash', filesMap, dirsSet);
         }
         return;
       }
-    } catch (e) { /* fallback به روش قدیمی */ }
-    // fallback: روش قدیمی BFS
+    } catch (e) {}
     const adapter = this.app.vault.adapter;
     const stack = [base]; const visited = new Set();
     while (stack.length) {
@@ -650,8 +812,6 @@ class FTPSyncPlugin extends Plugin {
     }
   }
   async collectRemote(client, remoteRoot, baseRel, filesMap, dirsSet) {
-    // v1.3.3 — سریع به سبک rclone lsjson --recursive: اول LIST -R را امتحان کن (یک درخواست برای کل درخت)
-    // اگر سرور پشتیبانی کرد، کل ایندکس در یک رفت‌وبرگشت ساخته می‌شود، نه یک LIST برای هر پوشه.
     try {
       const rec = await client.withRetry(() => client.listRecursive(remoteRoot), 'LIST -R');
       if (rec && Array.isArray(rec)) {
@@ -662,8 +822,6 @@ class FTPSyncPlugin extends Plugin {
           if (e.type === 'dir') dirsSet.add(e.rel);
           else filesMap.set(e.rel, { size: e.size, mtime: e.mtime });
         }
-        // v1.3.3: لایه اطمینان — لیست ریشه را جداگانه هم بگیر و merge کن.
-        // حتی اگر پارسر LIST -R در آینده یک فرمت عجیب دیگر را اشتباه فهمید، ریشه هیچ‌وقت گم نمی‌شود. فقط 1 درخواست اضافه است.
         try {
           const rootEntries = await client.withRetry(() => client.list(remoteRoot), 'LIST root');
           for (const e of rootEntries) {
@@ -675,15 +833,17 @@ class FTPSyncPlugin extends Plugin {
         } catch (e2) {}
         return;
       }
-    } catch (e) { /* fallback به BFS */ }
-    // fallback BFS قدیمی (برای سرورهایی که LIST -R ندارند)
+    } catch (e) {}
     const queue = [{ remotePath: remoteRoot, rel: '' }]; const seen = new Set();
     while (queue.length) {
       if (this.stopRequested) break;
       const cur = queue.shift(); if (seen.has(cur.remotePath)) continue; seen.add(cur.remotePath);
       let entries = [];
       try { entries = await client.withRetry(() => client.list(cur.remotePath), 'LIST'); }
-      catch (e) { this.addLog(`هشدار: لیست پوشه سرور ناموفق بود ${cur.remotePath}: ${e.message}`, 'warn'); continue; }
+      catch (e) {
+        const warnTxt = this.settings.language === 'en' ? `Warning: Failed to list server directory ${cur.remotePath}: ${e.message}` : `هشدار: لیست پوشه سرور ناموفق بود ${cur.remotePath}: ${e.message}`;
+        this.addLog(warnTxt, 'warn'); continue;
+      }
       for (const e of entries) {
         const relChild = cur.rel ? cur.rel + '/' + e.name : e.name;
         if (this.isExcluded('', relChild)) continue;
@@ -694,52 +854,60 @@ class FTPSyncPlugin extends Plugin {
     }
   }
   async testConnection() {
-    if (!this.settings.host || !this.settings.username) { new Notice('ابتدا هاست و نام کاربری را وارد کنید.'); return; }
-    if (!this.getPassword()) { new Notice('رمز عبور ذخیره نشده است. در تنظیمات رمز را وارد کنید.'); return; }
-    new Notice('در حال تست اتصال FTP…'); let client = null;
+    if (!this.settings.host || !this.settings.username) { new Notice(this.t('noticeEnterHostUser')); return; }
+    if (!this.getPassword()) { new Notice(this.t('noticeNoPassword')); return; }
+    new Notice(this.t('noticeTestingConn')); let client = null;
     try {
       client = new FTPClient({ host: this.settings.host, port: this.settings.port, user: this.settings.username, pass: this.getPassword(), secure: this.settings.secure, timeoutSeconds: this.settings.timeoutSeconds || 120, keepAliveSeconds: this.settings.keepAliveSeconds || 30, maxRetries: this.settings.maxRetries || 2 });
       await client.connect(); const root = this.settings.remotePath || '/'; await this.ensureRemotePath(client, root);
       const list = await client.list(root);
-      this.addLog(`تست اتصال موفق بود. پوشه ${root} شامل ${list.length} مورد است.`, 'success');
-      new Notice(`اتصال موفق ✅ پوشه ${root}: ${list.length} مورد`);
-    } catch (e) { this.addLog(`تست اتصال ناموفق: ${e.message}`, 'error'); new Notice('تست اتصال ناموفق: ' + e.message); }
+      const succLog = this.settings.language === 'en' ? `Connection test successful. Directory ${root} contains ${list.length} item(s).` : `تست اتصال موفق بود. پوشه ${root} شامل ${list.length} مورد است.`;
+      this.addLog(succLog, 'success');
+      new Notice(this.t('noticeConnSuccess', root, list.length));
+    } catch (e) {
+      const errLog = this.settings.language === 'en' ? `Connection test failed: ${e.message}` : `تست اتصال ناموفق: ${e.message}`;
+      this.addLog(errLog, 'error'); new Notice(this.t('noticeConnFailed', e.message));
+    }
     finally { try { if (client) await client.quit(); } catch (e) {} }
   }
   async performSync(isAuto) {
-    if (this.isSyncing) { new Notice('سینک در حال انجام است… برای توقف از تنظیمات یا ریبون استفاده کنید.'); return; }
-    if (!this.settings.host || !this.settings.username) { new Notice('تنظیمات FTP کامل نیست.'); return; }
-    if (!this.getPassword()) { new Notice('رمز عبور FTP ذخیره نشده است. در تنظیمات رمز را وارد کنید.'); return; }
+    if (this.isSyncing) { new Notice(this.t('noticeSyncRunningWait')); return; }
+    if (!this.settings.host || !this.settings.username) { new Notice(this.t('noticeIncompleteSettings')); return; }
+    if (!this.getPassword()) { new Notice(this.t('noticeNoPassword')); return; }
     this.isSyncing = true; this.stopRequested = false; this.updateStatusBar(0, 1);
-    this.addLog(isAuto ? 'شروع سینک خودکار…' : 'شروع سینک دستی…');
-    this.addLog(`تایم‌اوت: ${this.settings.timeoutSeconds || 120}ث | KeepAlive: ${this.settings.keepAliveSeconds || 30}ث | تلاش مجدد: ${this.settings.maxRetries || 2} | چک: ${this.settings.checkMode === 'precise' ? 'دقیق (سایز+mtime)' : 'سریع rclone (اسم+حجم)'} | .obsidian: ${this.settings.syncObsidian ? 'روشن' : 'خاموش'} | .trash: ${this.settings.syncTrash ? 'روشن' : 'خاموش'}`);
+    const isEn = this.settings.language === 'en';
+    this.addLog(isAuto ? (isEn ? 'Starting auto sync…' : 'شروع سینک خودکار…') : (isEn ? 'Starting manual sync…' : 'شروع سینک دستی…'));
+    this.addLog(isEn ? `Timeout: ${this.settings.timeoutSeconds || 120}s | KeepAlive: ${this.settings.keepAliveSeconds || 30}s | Retries: ${this.settings.maxRetries || 2} | Check: ${this.settings.checkMode === 'precise' ? 'Precise (size+mtime)' : 'Fast (name+size)'} | .obsidian: ${this.settings.syncObsidian ? 'ON' : 'OFF'} | .trash: ${this.settings.syncTrash ? 'ON' : 'OFF'}`
+                     : `تایم‌اوت: ${this.settings.timeoutSeconds || 120}ث | KeepAlive: ${this.settings.keepAliveSeconds || 30}ث | تلاش مجدد: ${this.settings.maxRetries || 2} | چک: ${this.settings.checkMode === 'precise' ? 'دقیق (سایز+mtime)' : 'سریع rclone (اسم+حجم)'} | .obsidian: ${this.settings.syncObsidian ? 'روشن' : 'خاموش'} | .trash: ${this.settings.syncTrash ? 'روشن' : 'خاموش'}`);
     let client = null;
     try {
       client = new FTPClient({ host: this.settings.host, port: Number(this.settings.port) || 21, user: this.settings.username, pass: this.getPassword(), secure: this.settings.secure, timeoutSeconds: this.settings.timeoutSeconds || 120, keepAliveSeconds: this.settings.keepAliveSeconds || 30, maxRetries: this.settings.maxRetries || 2 });
-      await client.connect(); this.addLog('اتصال به سرور FTP برقرار شد');
+      await client.connect(); this.addLog(isEn ? 'Connected to FTP server' : 'اتصال به سرور FTP برقرار شد');
       const remoteRoot = (this.settings.remotePath || '/').trim() || '/';
       await this.ensureRemotePath(client, remoteRoot);
       const localFolderRaw = (this.settings.localFolder || '').trim();
       const localFolder = localFolderRaw.replace(/^\/+|\/+$/g, '');
-      if (localFolder) { const exists = await this.app.vault.adapter.exists(localFolder); if (!exists) throw new Error(`پوشه محلی «${localFolder}» پیدا نشد.`); }
+      if (localFolder) {
+        const exists = await this.app.vault.adapter.exists(localFolder);
+        if (!exists) throw new Error(isEn ? `Local folder '${localFolder}' not found.` : `پوشه محلی «${localFolder}» پیدا نشد.`);
+      }
       const localFiles = new Map(); const localDirs = new Set();
       await this.collectLocal(localFolder, localFiles, localDirs);
       {
         let obsCount = 0, trashCount = 0;
         for (const k of localFiles.keys()) { if (k === '.obsidian' || k.startsWith('.obsidian/')) obsCount++; if (k === '.trash' || k.startsWith('.trash/')) trashCount++; }
         let extra = '';
-        if (this.settings.syncObsidian) extra += ` | .obsidian: ${obsCount} فایل`;
-        if (this.settings.syncTrash) extra += ` | .trash: ${trashCount} فایل`;
-        this.addLog(`فایل‌های محلی: ${localFiles.size} فایل${extra}`);
+        if (this.settings.syncObsidian) extra += isEn ? ` | .obsidian: ${obsCount} files` : ` | .obsidian: ${obsCount} فایل`;
+        if (this.settings.syncTrash) extra += isEn ? ` | .trash: ${trashCount} files` : ` | .trash: ${trashCount} فایل`;
+        this.addLog(isEn ? `Local files: ${localFiles.size} file(s)${extra}` : `فایل‌های محلی: ${localFiles.size} فایل${extra}`);
       }
       if (this.stopRequested) throw new Error('STOPPED');
       const remoteFiles = new Map(); const remoteDirs = new Set();
       await this.collectRemote(client, remoteRoot, '', remoteFiles, remoteDirs);
-      this.addLog(`فایل‌های سرور: ${remoteFiles.size} فایل، ${remoteDirs.size} پوشه`);
+      this.addLog(isEn ? `Remote files: ${remoteFiles.size} files, ${remoteDirs.size} folders` : `فایل‌های سرور: ${remoteFiles.size} فایل، ${remoteDirs.size} پوشه`);
       if (this.stopRequested) throw new Error('STOPPED');
       const mode = this.settings.syncMode || 'mirror-upload';
       const actions = [];
-      // ---- تصمیم‌گیری با منطق درست v1.2.0 ----
       if (mode === 'mirror-upload') {
         for (const d of localDirs) { if (!d || d === '/' || d === '.') continue; if (!remoteDirs.has(d)) actions.push({ type: 'mkdirRemote', rel: d }); }
         for (const [rel, lf] of localFiles) {
@@ -747,13 +915,9 @@ class FTPSyncPlugin extends Plugin {
           const rf = remoteFiles.get(rel);
           if (!rf) { actions.push({ type: 'upload', rel, local: lf }); continue; }
           if (lf.size !== rf.size) { actions.push({ type: 'upload', rel, local: lf }); continue; }
-          // سایز برابر
           if (this.isUnchangedSinceLastSync(rel, lf, rf)) continue;
-          // v1.3.3 FAST (rclone-style): اسم+حجم برابر = موجود است — بدون MDTM، بدون چک mtime. خیلی سریع.
           if ((this.settings.checkMode || 'fast') === 'fast') { this.updateState(rel, lf, rf); continue; }
-          // نکته کلیدی: فقط وقتی محلی جدیدتر است آپلود کن. اگر سرور جدیدتر/مساوی است، یعنی قبلاً آپلود شده (MDTM ست نشده و زمان سرور جدیدتر است) — رد کن و state را به‌روز کن
           if (lf.mtime <= rf.mtime + 2000) { this.updateState(rel, lf, rf); continue; }
-          // محلی جدیدتر است
           const diff = lf.mtime - rf.mtime;
           if (diff <= 120000) {
             try { const pr = await client.withRetry(() => client.getMtime(this.joinRemote(remoteRoot, rel)), 'MDTM'); if (pr) { rf.mtime = pr; if (lf.mtime <= pr + 2000) { this.updateState(rel, lf, rf); continue; } } } catch (e) {}
@@ -787,7 +951,6 @@ class FTPSyncPlugin extends Plugin {
           for (const d of orphanDirs) actions.push({ type: 'removeLocalDir', rel: d });
         }
       } else {
-        // two-way
         for (const d of localDirs) { if (!d || d === '/' || d === '.') continue; if (!remoteDirs.has(d)) actions.push({ type: 'mkdirRemote', rel: d }); }
         for (const d of remoteDirs) { if (!d || d === '/' || d === '.') continue; if (!localDirs.has(d)) actions.push({ type: 'mkdirLocal', rel: d }); }
         const allKeys = new Set([...localFiles.keys(), ...remoteFiles.keys()]);
@@ -797,19 +960,15 @@ class FTPSyncPlugin extends Plugin {
           if (lf && !rf) { actions.push({ type: 'upload', rel, local: lf }); continue; }
           if (!lf && rf) { actions.push({ type: 'download', rel, remote: rf }); continue; }
           if (lf && rf) {
-            // v1.3.3 FAST: در حالت سریع، اگر سایز برابر است و state چیزی را نشان نمی‌دهد، فرض کن همان فایل است (rclone-style)
             if (lf.size === rf.size && (this.settings.checkMode || 'fast') === 'fast') {
               if (this.isUnchangedSinceLastSync(rel, lf, rf)) continue;
-              // اگر محلی از آخرین سینک عوض شده و سرور نه، آپلود کن؛ اگر سرور عوض شده و محلی نه، دانلود کن؛ وگرنه رد کن
               const st = this.getState(rel);
               if (st && Math.abs(lf.mtime - (st.localMtime || 0)) > 2000 && Math.abs(rf.mtime - (st.remoteMtime || 0)) <= 120000) { actions.push({ type: 'upload', rel, local: lf }); continue; }
               if (st && Math.abs(rf.mtime - (st.remoteMtime || 0)) > 120000 && Math.abs(lf.mtime - (st.localMtime || 0)) <= 2000) { actions.push({ type: 'download', rel, remote: rf }); continue; }
-              // بدون state یا هر دو عوض شده/نشده: سایز برابر = رد کن (rclone-style)
               this.updateState(rel, lf, rf); continue;
             }
             if (lf.size !== rf.size) {
               if (this.isUnchangedSinceLastSync(rel, lf, rf)) continue;
-              // سایز فرق دارد: با mtime تصمیم بگیر، با کمک state
               const st = this.getState(rel);
               if (st && Math.abs(lf.mtime - (st.localMtime || 0)) <= 2000 && Math.abs(rf.mtime - (st.remoteMtime || 0)) > 120000) { actions.push({ type: 'download', rel, remote: rf }); continue; }
               if (st && Math.abs(rf.mtime - (st.remoteMtime || 0)) <= 120000 && Math.abs(lf.mtime - (st.localMtime || 0)) > 2000) { actions.push({ type: 'upload', rel, local: lf }); continue; }
@@ -818,7 +977,6 @@ class FTPSyncPlugin extends Plugin {
               else actions.push({ type: 'upload', rel, local: lf });
               continue;
             }
-            // سایز برابر
             if (this.isUnchangedSinceLastSync(rel, lf, rf)) continue;
             const diff = lf.mtime - rf.mtime;
             if (Math.abs(diff) <= 2000) { this.updateState(rel, lf, rf); continue; }
@@ -826,7 +984,6 @@ class FTPSyncPlugin extends Plugin {
               if (diff > 0) actions.push({ type: 'upload', rel, local: lf }); else actions.push({ type: 'download', rel, remote: rf });
               continue;
             }
-            // اختلاف کم: MDTM دقیق بگیر
             try { const pr = await client.withRetry(() => client.getMtime(this.joinRemote(remoteRoot, rel)), 'MDTM'); if (pr) rf.mtime = pr; } catch (e) {}
             const diff2 = lf.mtime - rf.mtime;
             if (Math.abs(diff2) <= 2000) { this.updateState(rel, lf, rf); continue; }
@@ -835,51 +992,90 @@ class FTPSyncPlugin extends Plugin {
         }
       }
       if (this.stopRequested) throw new Error('STOPPED');
-      this.addLog(`عملیات‌های لازم: ${actions.length} مورد (از ${localFiles.size} محلی و ${remoteFiles.size} سرور)`);
-      if (actions.length === 0) this.addLog('همه فایل‌ها همگام هستند — چیزی برای کپی نیست ✅');
+      this.addLog(isEn ? `Required operations: ${actions.length} items (${localFiles.size} local, ${remoteFiles.size} remote)` : `عملیات‌های لازم: ${actions.length} مورد (از ${localFiles.size} محلی و ${remoteFiles.size} سرور)`);
+      if (actions.length === 0) this.addLog(isEn ? 'All files are up to date — nothing to sync ✅' : 'همه فایل‌ها همگام هستند — چیزی برای کپی نیست ✅');
       const order = { mkdirRemote: 0, mkdirLocal: 0, upload: 1, download: 1, deleteRemote: 2, deleteLocal: 2, removeRemoteDir: 3, removeLocalDir: 3 };
       actions.sort((a, b) => (order[a.type] ?? 1) - (order[b.type] ?? 1));
       const total = actions.length; let done = 0; let uploaded = 0, downloaded = 0, deleted = 0;
       this.updateStatusBar(0, Math.max(total, 1));
       for (const act of actions) {
-        if (this.stopRequested) { this.addLog(`⏹️ سینک متوقف شد در ${done}/${total} — آپلود: ${uploaded}، دانلود: ${downloaded}. سینک بعدی فقط باقی‌مانده را انجام می‌دهد.`, 'warn'); break; }
+        if (this.stopRequested) {
+          const stopTxt = isEn ? `⏹️ Sync stopped at ${done}/${total} — Uploaded: ${uploaded}, Downloaded: ${downloaded}. Next sync will continue remaining items.` : `⏹️ سینک متوقف شد در ${done}/${total} — آپلود: ${uploaded}، دانلود: ${downloaded}. سینک بعدی فقط باقی‌مانده را انجام می‌دهد.`;
+          this.addLog(stopTxt, 'warn'); break;
+        }
         try {
           try { await client.maybeKeepAlive(); } catch (e) {}
-          if (act.type === 'mkdirRemote') { if (!act.rel || act.rel === '/' || act.rel === '.') { /* ریشه والت پوشه نیست */ } else { await client.withRetry(() => client.mkdir(this.joinRemote(remoteRoot, act.rel)), 'MKD'); this.addLog(`📁 پوشه ساخته شد در سرور: ${act.rel}`); } }
-          else if (act.type === 'mkdirLocal') { const lp = localFolder ? `${localFolder}/${act.rel}` : act.rel; await this.ensureLocalDir(lp); this.addLog(`📁 پوشه ساخته شد محلی: ${act.rel}`); }
+          if (act.type === 'mkdirRemote') {
+            if (!act.rel || act.rel === '/' || act.rel === '.') {}
+            else {
+              await client.withRetry(() => client.mkdir(this.joinRemote(remoteRoot, act.rel)), 'MKD');
+              this.addLog(isEn ? `📁 Remote folder created: ${act.rel}` : `📁 پوشه ساخته شد در سرور: ${act.rel}`);
+            }
+          }
+          else if (act.type === 'mkdirLocal') {
+            const lp = localFolder ? `${localFolder}/${act.rel}` : act.rel;
+            await this.ensureLocalDir(lp);
+            this.addLog(isEn ? `📁 Local folder created: ${act.rel}` : `📁 پوشه ساخته شد محلی: ${act.rel}`);
+          }
           else if (act.type === 'upload') {
             const localPath = localFolder ? `${localFolder}/${act.rel}` : act.rel;
             const buf = await this.app.vault.adapter.readBinary(localPath);
             await client.withRetry(() => client.upload(this.joinRemote(remoteRoot, act.rel), Buffer.from(buf), act.local.mtime), 'STOR');
-            uploaded++; this.addLog(`⬆️ آپلود: ${act.rel}`);
+            uploaded++;
+            this.addLog(isEn ? `⬆️ Upload: ${act.rel}` : `⬆️ آپلود: ${act.rel}`);
             try { const after = await client.getMtime(this.joinRemote(remoteRoot, act.rel)); this.updateState(act.rel, act.local, { size: act.local.size, mtime: after || act.local.mtime }); } catch (e) { this.updateState(act.rel, act.local, { size: act.local.size, mtime: act.local.mtime }); }
           } else if (act.type === 'download') {
             const buf = await client.withRetry(() => client.download(this.joinRemote(remoteRoot, act.rel)), 'RETR');
             const localPath = localFolder ? `${localFolder}/${act.rel}` : act.rel;
             await this.ensureLocalDirParent(localPath); await this.app.vault.adapter.writeBinary(localPath, buf);
             try { await this.setLocalMtime(localPath, act.remote.mtime); } catch (e) {}
-            downloaded++; this.addLog(`⬇️ دانلود: ${act.rel}`);
+            downloaded++;
+            this.addLog(isEn ? `⬇️ Download: ${act.rel}` : `⬇️ دانلود: ${act.rel}`);
             this.updateState(act.rel, { size: act.remote.size, mtime: act.remote.mtime }, act.remote);
-          } else if (act.type === 'deleteRemote') { if (!act.rel || act.rel.endsWith(':')) { this.addLog(`⚠️ رد حذف مشکوک (اثر پارسر): ${act.rel} — فایل واقعی با : تمام نمی‌شود`,'warn'); } else { await client.withRetry(() => client.deleteFile(this.joinRemote(remoteRoot, act.rel)), 'DELE'); deleted++; this.addLog(`🗑️ حذف از سرور: ${act.rel}`); } }
-          else if (act.type === 'deleteLocal') { const localPath = localFolder ? `${localFolder}/${act.rel}` : act.rel; await this.app.vault.adapter.remove(localPath); deleted++; this.addLog(`🗑️ حذف محلی: ${act.rel}`); }
+          } else if (act.type === 'deleteRemote') {
+            if (!act.rel || act.rel.endsWith(':')) {
+              this.addLog(isEn ? `⚠️ Skipped suspicious delete: ${act.rel}` : `⚠️ رد حذف مشکوک (اثر پارسر): ${act.rel} — فایل واقعی با : تمام نمی‌شود`, 'warn');
+            } else {
+              await client.withRetry(() => client.deleteFile(this.joinRemote(remoteRoot, act.rel)), 'DELE');
+              deleted++;
+              this.addLog(isEn ? `🗑️ Delete remote: ${act.rel}` : `🗑️ حذف از سرور: ${act.rel}`);
+            }
+          } else if (act.type === 'deleteLocal') {
+            const localPath = localFolder ? `${localFolder}/${act.rel}` : act.rel;
+            await this.app.vault.adapter.remove(localPath);
+            deleted++;
+            this.addLog(isEn ? `🗑️ Delete local: ${act.rel}` : `🗑️ حذف محلی: ${act.rel}`);
+          }
           else if (act.type === 'removeRemoteDir') { await client.withRetry(() => client.removeDir(this.joinRemote(remoteRoot, act.rel)), 'RMD'); }
           else if (act.type === 'removeLocalDir') { const localPath = localFolder ? `${localFolder}/${act.rel}` : act.rel; try { await this.app.vault.adapter.remove(localPath); } catch (e) {} }
         } catch (e) {
-          this.addLog(`خطا در ${act.type} ${act.rel}: ${e.message} — ادامه سینک…`, 'error');
-          if (!client.isConnected()) { try { await client.reconnect(); this.addLog('اتصال مجدد برقرار شد، ادامه سینک…'); } catch (re) { this.addLog(`اتصال مجدد ناموفق: ${re.message}`, 'error'); } }
+          const errItemTxt = isEn ? `Error in ${act.type} ${act.rel}: ${e.message} — continuing sync…` : `خطا در ${act.type} ${act.rel}: ${e.message} — ادامه سینک…`;
+          this.addLog(errItemTxt, 'error');
+          if (!client.isConnected()) {
+            try {
+              await client.reconnect();
+              this.addLog(isEn ? 'Reconnected, continuing sync…' : 'اتصال مجدد برقرار شد، ادامه سینک…');
+            } catch (re) {
+              this.addLog(isEn ? `Reconnect failed: ${re.message}` : `اتصال مجدد ناموفق: ${re.message}`, 'error');
+            }
+          }
         }
         done++; this.updateStatusBar(done, total);
         await new Promise((r) => setTimeout(r, 0));
       }
-      if (this.stopRequested) { new Notice('سینک متوقف شد ⏹️'); }
+      if (this.stopRequested) { new Notice(this.t('noticeSyncStopped')); }
       else {
         this.settings.lastSync = Date.now(); await this.saveData(this.settings);
-        this.addLog(`سینک کامل شد. آپلود: ${uploaded}، دانلود: ${downloaded}، حذف: ${deleted}`, 'success');
-        new Notice(`FTP Sync کامل شد ✅ آپلود: ${uploaded} دانلود: ${downloaded} حذف: ${deleted}`);
+        const doneTxt = isEn ? `Sync completed. Uploaded: ${uploaded}, Downloaded: ${downloaded}, Deleted: ${deleted}` : `سینک کامل شد. آپلود: ${uploaded}، دانلود: ${downloaded}، حذف: ${deleted}`;
+        this.addLog(doneTxt, 'success');
+        new Notice(this.t('noticeSyncComplete', uploaded, downloaded, deleted));
       }
     } catch (e) {
-      if (e && e.message === 'STOPPED') new Notice('سینک متوقف شد ⏹️');
-      else { this.addLog(`خطای سینک: ${e.message}`, 'error'); new Notice('خطای FTP Sync: ' + e.message); }
+      if (e && e.message === 'STOPPED') new Notice(this.t('noticeSyncStopped'));
+      else {
+        const syncFailTxt = isEn ? `Sync error: ${e.message}` : `خطای سینک: ${e.message}`;
+        this.addLog(syncFailTxt, 'error'); new Notice(this.t('noticeSyncError', e.message));
+      }
     } finally {
       try { await this.saveData(this.settings); } catch (e) {}
       try { if (client) await client.quit(); } catch (e) {}
@@ -892,13 +1088,21 @@ class LogModal extends Modal {
   constructor(app, plugin) { super(app); this.plugin = plugin; }
   onOpen() {
     const { contentEl } = this; contentEl.empty();
-    contentEl.createEl('h2', { text: 'لاگ FTP Sync' });
+    const isEn = this.plugin.settings && this.plugin.settings.language === 'en';
+    contentEl.createEl('h2', { text: this.plugin.t('modalLogTitle') });
     const pre = contentEl.createEl('pre', { cls: 'ftp-sync-log' });
-    pre.setText(this.plugin.logs.join('\n') || 'لاگی وجود ندارد.');
+    if (isEn) pre.style.direction = 'ltr';
+    pre.setText(this.plugin.logs.join('\n') || this.plugin.t('modalNoLogs'));
     const row = contentEl.createDiv({ cls: 'ftp-sync-modal-actions' });
-    const clearBtn = row.createEl('button', { text: 'پاک کردن لاگ' });
-    clearBtn.onclick = () => { this.plugin.logs = []; this.plugin.settings.logs = []; this.plugin.saveData(this.plugin.settings); try { this.plugin._notifyLogListeners(); } catch (e) {} pre.setText('لاگ پاک شد.'); };
-    const closeBtn = row.createEl('button', { text: 'بستن' }); closeBtn.onclick = () => this.close();
+    const clearBtn = row.createEl('button', { text: this.plugin.t('modalClearLog') });
+    clearBtn.onclick = () => {
+      this.plugin.logs = []; this.plugin.settings.logs = [];
+      this.plugin.saveData(this.plugin.settings);
+      try { this.plugin._notifyLogListeners(); } catch (e) {}
+      pre.setText(this.plugin.t('modalLogCleared'));
+    };
+    const closeBtn = row.createEl('button', { text: this.plugin.t('modalClose') });
+    closeBtn.onclick = () => this.close();
   }
   onClose() { const { contentEl } = this; contentEl.empty(); }
 }
@@ -907,57 +1111,87 @@ class FTPSyncSettingTab extends PluginSettingTab {
   constructor(app, plugin) { super(app, plugin); this.plugin = plugin; }
   display() {
     const { containerEl } = this; containerEl.empty();
-    containerEl.createEl('h2', { text: 'FTP Sync / Backup — تنظیمات' });
-    containerEl.createEl('p', { text: 'فقط روی Obsidian دسکتاپ کار می‌کند. پسورد به صورت رمزنگاری‌شده ذخیره می‌شود و در فایل data.json قابل خواندن نیست.' });
-    new Setting(containerEl).setName('هاست FTP').setDesc('مثال: ftp.example.com یا IP سرور').addText((t) => t.setPlaceholder('ftp.example.com').setValue(this.plugin.settings.host).onChange(async (v) => { this.plugin.settings.host = v.trim(); await this.plugin.saveData(this.plugin.settings); }));
-    new Setting(containerEl).setName('پورت').setDesc('پیش‌فرض FTP: 21 ، FTPS Implicit: 990').addText((t) => t.setPlaceholder('21').setValue(String(this.plugin.settings.port)).onChange(async (v) => { const n = parseInt(v, 10); if (!isNaN(n)) { this.plugin.settings.port = n; await this.plugin.saveData(this.plugin.settings); } }));
-    new Setting(containerEl).setName('نام کاربری').addText((t) => t.setPlaceholder('username').setValue(this.plugin.settings.username).onChange(async (v) => { this.plugin.settings.username = v; await this.plugin.saveData(this.plugin.settings); }));
-    // v1.3.3: پسورد هرگز در data.json به صورت متن ساده نیست — فقط رمزنگاری‌شده ذخیره می‌شود، متن ساده فقط در حافظه (RAM) است
-    const hasPw = !!this.plugin.getPassword();
-    new Setting(containerEl).setName('رمز عبور').setDesc(hasPw ? 'رمز عبور ذخیره شده و رمزنگاری‌شده است (در data.json قابل خواندن نیست). برای تغییر، رمز جدید را بنویسید. خالی گذاشتن یعنی نگه داشتن رمز قبلی.' : 'رمز عبور را وارد کنید — به صورت رمزنگاری‌شده ذخیره می‌شود و در data.json قابل خواندن نیست.').addText((t) => { t.inputEl.type = 'password'; t.setPlaceholder(hasPw ? '•••••• (ذخیره شده)' : 'رمز عبور').setValue('').onChange(async (v) => { if (v) { await this.plugin.setPassword(v); } }); });
-    new Setting(containerEl).setName('پاک کردن رمز ذخیره‌شده').setDesc('رمز عبور را از حافظه و فایل تنظیمات پاک می‌کند.').addButton((b) => b.setButtonText('پاک کردن رمز').onClick(async () => { await this.plugin.clearPassword(); new Notice('رمز عبور پاک شد.'); this.display(); }));
-    new Setting(containerEl).setName('پروتکل').setDesc('اگر سرورتان FTPS پشتیبانی می‌کند، Explicit را انتخاب کنید.').addDropdown((d) => d.addOption('ftp', 'FTP (بدون رمزنگاری)').addOption('ftps-explicit', 'FTPS Explicit (پیشنهادی)').addOption('ftps-implicit', 'FTPS Implicit (پورت 990)').setValue(this.plugin.settings.secure).onChange(async (v) => { this.plugin.settings.secure = v; await this.plugin.saveData(this.plugin.settings); }));
-    new Setting(containerEl).setName('پوشه مقصد در سرور FTP').setDesc('مثال: /obsidian-backup — اگر وجود نداشته باشد ساخته می‌شود.').addText((t) => t.setPlaceholder('/obsidian-backup').setValue(this.plugin.settings.remotePath).onChange(async (v) => { this.plugin.settings.remotePath = v.trim() || '/'; await this.plugin.saveData(this.plugin.settings); }));
-    new Setting(containerEl).setName('پوشه محلی برای سینک').setDesc('خالی = کل والت. مثال: Notes/Work').addText((t) => t.setPlaceholder('خالی = کل والت').setValue(this.plugin.settings.localFolder).onChange(async (v) => { this.plugin.settings.localFolder = v.trim(); await this.plugin.saveData(this.plugin.settings); }));
-    new Setting(containerEl).setName('حالت سینک').setDesc('میرور آپلود: والت → سرور. دوطرفه: جدیدترین برنده است. میرور دانلود: سرور → والت.').addDropdown((d) => d.addOption('mirror-upload', 'میرور آپلود — بک‌آپ به سرور (محلی → سرور)').addOption('two-way', 'دوطرفه — جدیدترین فایل برنده است').addOption('mirror-download', 'میرور دانلود — از سرور به والت (سرور → محلی)').setValue(this.plugin.settings.syncMode).onChange(async (v) => { this.plugin.settings.syncMode = v; await this.plugin.saveData(this.plugin.settings); }));
-    // v1.3.3: چک سریع به سبک rclone
-    new Setting(containerEl).setName('سرعت چک اولیه').setDesc('سریع (پیش‌فرض، مثل rclone): فقط اسم + حجم چک می‌شود، بدون MDTM برای هر فایل — چک اولیه 1340 فایل در چند ثانیه. دقیق: سایز + زمان تغییر + MDTM — کندتر ولی اگر فایلی را بدون تغییر سایز ویرایش کنی هم می‌فهمد.').addDropdown((d) => d.addOption('fast', 'سریع — اسم + حجم (مثل rclone)').addOption('precise', 'دقیق — سایز + زمان + MDTM').setValue(this.plugin.settings.checkMode || 'fast').onChange(async (v) => { this.plugin.settings.checkMode = v; await this.plugin.saveData(this.plugin.settings); }));
-    new Setting(containerEl).setName('حذف فایل‌های اضافی در حالت میرور').setDesc('اگر روشن باشد، در حالت میرور فایل‌هایی که در طرف مبدأ نیستند از طرف مقصد حذف می‌شوند.').addToggle((t) => t.setValue(this.plugin.settings.deleteOrphan).onChange(async (v) => { this.plugin.settings.deleteOrphan = v; await this.plugin.saveData(this.plugin.settings); }));
-    containerEl.createEl('h3', { text: 'پوشه‌های سیستمی — انتخابی' });
-    new Setting(containerEl).setName('سینک پوشه .obsidian').setDesc('خاموش = پیش‌فرض، .obsidian سینک نمی‌شود. روشن = تنظیمات و تم و پلاگین‌ها هم سینک می‌شوند. پوشه خود این افزونه هرگز سینک نمی‌شود تا لوپ نشود.').addToggle((t) => t.setValue(!!this.plugin.settings.syncObsidian).onChange(async (v) => { this.plugin.settings.syncObsidian = v; await this.plugin.saveData(this.plugin.settings); }));
-    new Setting(containerEl).setName('سینک پوشه .trash').setDesc('خاموش = پیش‌فرض. روشن = فایل‌های داخل .trash هم سینک می‌شوند.').addToggle((t) => t.setValue(!!this.plugin.settings.syncTrash).onChange(async (v) => { this.plugin.settings.syncTrash = v; await this.plugin.saveData(this.plugin.settings); }));
-    containerEl.createEl('h3', { text: 'پایداری اتصال — رفع تایم‌اوت' });
-    new Setting(containerEl).setName('تایم‌اوت هر دستور (ثانیه)').setDesc('پیش‌فرض 120. اگر والت بزرگ است یا اینترنت کند است، بگذارید 300.').addText((t) => t.setPlaceholder('120').setValue(String(this.plugin.settings.timeoutSeconds || 120)).onChange(async (v) => { const n = parseInt(v, 10); this.plugin.settings.timeoutSeconds = isNaN(n) ? 120 : Math.min(600, Math.max(30, n)); await this.plugin.saveData(this.plugin.settings); }));
-    new Setting(containerEl).setName('فاصله KeepAlive (ثانیه)').setDesc('هر چند ثانیه NOOP بفرستد تا اتصال قطع نشود. پیش‌فرض 30.').addText((t) => t.setPlaceholder('30').setValue(String(this.plugin.settings.keepAliveSeconds || 30)).onChange(async (v) => { const n = parseInt(v, 10); this.plugin.settings.keepAliveSeconds = isNaN(n) ? 30 : Math.min(120, Math.max(10, n)); await this.plugin.saveData(this.plugin.settings); }));
-    new Setting(containerEl).setName('تعداد تلاش مجدد در صورت قطعی').setDesc('اگر وسط سینک قطع شود، چند بار وصل شود و از همان فایل ادامه دهد. پیش‌فرض 2.').addText((t) => t.setPlaceholder('2').setValue(String(this.plugin.settings.maxRetries ?? 2)).onChange(async (v) => { const n = parseInt(v, 10); this.plugin.settings.maxRetries = isNaN(n) ? 2 : Math.min(5, Math.max(0, n)); await this.plugin.saveData(this.plugin.settings); }));
-    new Setting(containerEl).setName('سینک خودکار — هر چند دقیقه؟').setDesc('0 = خاموش. مثال: 15 یعنی هر 15 دقیقه.').addText((t) => t.setPlaceholder('0').setValue(String(this.plugin.settings.autoSyncMinutes)).onChange(async (v) => { const n = parseInt(v, 10); this.plugin.settings.autoSyncMinutes = isNaN(n) ? 0 : Math.max(0, n); await this.plugin.saveData(this.plugin.settings); this.plugin.setupAutoSync(); }));
-    new Setting(containerEl).setName('سینک هنگام باز شدن Obsidian').addToggle((t) => t.setValue(this.plugin.settings.autoSyncOnStartup).onChange(async (v) => { this.plugin.settings.autoSyncOnStartup = v; await this.plugin.saveData(this.plugin.settings); }));
-    new Setting(containerEl).setName('تست و سینک').setDesc('ابتدا تست اتصال را بزنید، بعد سینک کنید.').addButton((b) => b.setButtonText('تست اتصال').onClick(async () => { await this.plugin.testConnection(); })).addButton((b) => b.setButtonText('سینک اکنون').setCta().onClick(async () => { await this.plugin.performSync(false); })).addButton((b) => b.setButtonText('نمایش لاگ').onClick(() => { new LogModal(this.app, this.plugin).open(); }));
-    // دکمه توقف — همیشه فعال، بدون نیاز به رفرش. v1.2.0: دکمه بیخود به‌روزرسانی وضعیت حذف شد
-    const stopSetting = new Setting(containerEl).setName('توقف سینک').setDesc(this.plugin.isSyncing ? 'سینک در حال انجام است — برای توقف کلیک کنید.' : 'اگر سینکی در حال انجام باشد، با این دکمه متوقفش کنید. نیازی به رفرش تنظیمات نیست.');
-    stopSetting.addButton((b) => {
-      b.setButtonText('⏹️ توقف سینک');
-      try { b.buttonEl.style.background = '#c92a2a'; b.buttonEl.style.color = '#fff'; b.buttonEl.style.borderColor = '#c92a2a'; } catch (e) {}
-      b.onClick(() => { this.plugin.requestStop(); });
-      // عمداً setDisabled نمی‌کنیم — دکمه همیشه فعال است تا وسط سینک هم کار کند
+    const p = this.plugin;
+    const isEn = p.settings && p.settings.language === 'en';
+
+    containerEl.createEl('h2', { text: p.t('settingsTitle') });
+    containerEl.createEl('p', { text: p.t('settingsDesc') });
+
+    // تنظیم زبان در ابتدای صفحه تنظیمات
+    new Setting(containerEl)
+      .setName(p.t('langName'))
+      .setDesc(p.t('langDesc'))
+      .addDropdown((d) => d
+        .addOption('fa', 'فارسی (Persian)')
+        .addOption('en', 'English')
+        .setValue(p.settings.language || 'fa')
+        .onChange(async (v) => {
+          p.settings.language = v;
+          await p.saveData(p.settings);
+          p.updateStatusBar();
+          this.display();
+        })
+      );
+
+    new Setting(containerEl).setName(p.t('hostName')).setDesc(p.t('hostDesc')).addText((t) => t.setPlaceholder('ftp.example.com').setValue(p.settings.host).onChange(async (v) => { p.settings.host = v.trim(); await p.saveData(p.settings); }));
+    new Setting(containerEl).setName(p.t('portName')).setDesc(p.t('portDesc')).addText((t) => t.setPlaceholder('21').setValue(String(p.settings.port)).onChange(async (v) => { const n = parseInt(v, 10); if (!isNaN(n)) { p.settings.port = n; await p.saveData(p.settings); } }));
+    new Setting(containerEl).setName(p.t('userName')).addText((t) => t.setPlaceholder('username').setValue(p.settings.username).onChange(async (v) => { p.settings.username = v; await p.saveData(p.settings); }));
+
+    const hasPw = !!p.getPassword();
+    new Setting(containerEl).setName(p.t('passName')).setDesc(hasPw ? p.t('passDescSaved') : p.t('passDescNotSaved')).addText((t) => {
+      t.inputEl.type = 'password';
+      t.setPlaceholder(hasPw ? p.t('passPlaceholderSaved') : p.t('passPlaceholderEmpty')).setValue('').onChange(async (v) => { if (v) { await p.setPassword(v); } });
     });
-    containerEl.createEl('h3', { text: 'لاگ سینک — زنده' });
-    containerEl.createEl('p', { text: 'لاگ به صورت زنده سینک می‌شود، نیازی به دکمه به‌روزرسانی نیست. حین سینک همینجا خط‌به‌خط می‌آید.', cls: 'ftp-sync-note' });
+    new Setting(containerEl).setName(p.t('clearPassName')).setDesc(p.t('clearPassDesc')).addButton((b) => b.setButtonText(p.t('clearPassBtn')).onClick(async () => { await p.clearPassword(); new Notice(p.t('noticePasswordCleared')); this.display(); }));
+    new Setting(containerEl).setName(p.t('protoName')).setDesc(p.t('protoDesc')).addDropdown((d) => d.addOption('ftp', p.t('protoOptFtp')).addOption('ftps-explicit', p.t('protoOptExplicit')).addOption('ftps-implicit', p.t('protoOptImplicit')).setValue(p.settings.secure).onChange(async (v) => { p.settings.secure = v; await p.saveData(p.settings); }));
+    new Setting(containerEl).setName(p.t('remotePathName')).setDesc(p.t('remotePathDesc')).addText((t) => t.setPlaceholder('/obsidian-backup').setValue(p.settings.remotePath).onChange(async (v) => { p.settings.remotePath = v.trim() || '/'; await p.saveData(p.settings); }));
+    new Setting(containerEl).setName(p.t('localFolderName')).setDesc(p.t('localFolderDesc')).addText((t) => t.setPlaceholder(p.t('localFolderPlaceholder')).setValue(p.settings.localFolder).onChange(async (v) => { p.settings.localFolder = v.trim(); await p.saveData(p.settings); }));
+    new Setting(containerEl).setName(p.t('syncModeName')).setDesc(p.t('syncModeDesc')).addDropdown((d) => d.addOption('mirror-upload', p.t('syncModeUpload')).addOption('two-way', p.t('syncModeTwoWay')).addOption('mirror-download', p.t('syncModeDownload')).setValue(p.settings.syncMode).onChange(async (v) => { p.settings.syncMode = v; await p.saveData(p.settings); }));
+    new Setting(containerEl).setName(p.t('checkSpeedName')).setDesc(p.t('checkSpeedDesc')).addDropdown((d) => d.addOption('fast', p.t('checkSpeedFast')).addOption('precise', p.t('checkSpeedPrecise')).setValue(p.settings.checkMode || 'fast').onChange(async (v) => { p.settings.checkMode = v; await p.saveData(p.settings); }));
+    new Setting(containerEl).setName(p.t('delOrphanName')).setDesc(p.t('delOrphanDesc')).addToggle((t) => t.setValue(p.settings.deleteOrphan).onChange(async (v) => { p.settings.deleteOrphan = v; await p.saveData(p.settings); }));
+
+    containerEl.createEl('h3', { text: p.t('secSysFolders') });
+    new Setting(containerEl).setName(p.t('syncObsidianName')).setDesc(p.t('syncObsidianDesc')).addToggle((t) => t.setValue(!!p.settings.syncObsidian).onChange(async (v) => { p.settings.syncObsidian = v; await p.saveData(p.settings); }));
+    new Setting(containerEl).setName(p.t('syncTrashName')).setDesc(p.t('syncTrashDesc')).addToggle((t) => t.setValue(!!p.settings.syncTrash).onChange(async (v) => { p.settings.syncTrash = v; await p.saveData(p.settings); }));
+
+    containerEl.createEl('h3', { text: p.t('secConnStability') });
+    new Setting(containerEl).setName(p.t('timeoutName')).setDesc(p.t('timeoutDesc')).addText((t) => t.setPlaceholder('120').setValue(String(p.settings.timeoutSeconds || 120)).onChange(async (v) => { const n = parseInt(v, 10); p.settings.timeoutSeconds = isNaN(n) ? 120 : Math.min(600, Math.max(30, n)); await p.saveData(p.settings); }));
+    new Setting(containerEl).setName(p.t('keepAliveName')).setDesc(p.t('keepAliveDesc')).addText((t) => t.setPlaceholder('30').setValue(String(p.settings.keepAliveSeconds || 30)).onChange(async (v) => { const n = parseInt(v, 10); p.settings.keepAliveSeconds = isNaN(n) ? 30 : Math.min(120, Math.max(10, n)); await p.saveData(p.settings); }));
+    new Setting(containerEl).setName(p.t('retriesName')).setDesc(p.t('retriesDesc')).addText((t) => t.setPlaceholder('2').setValue(String(p.settings.maxRetries ?? 2)).onChange(async (v) => { const n = parseInt(v, 10); p.settings.maxRetries = isNaN(n) ? 2 : Math.min(5, Math.max(0, n)); await p.saveData(p.settings); }));
+    new Setting(containerEl).setName(p.t('autoSyncName')).setDesc(p.t('autoSyncDesc')).addText((t) => t.setPlaceholder('0').setValue(String(p.settings.autoSyncMinutes)).onChange(async (v) => { const n = parseInt(v, 10); p.settings.autoSyncMinutes = isNaN(n) ? 0 : Math.max(0, n); await p.saveData(p.settings); p.setupAutoSync(); }));
+    new Setting(containerEl).setName(p.t('autoSyncStartupName')).addToggle((t) => t.setValue(p.settings.autoSyncOnStartup).onChange(async (v) => { p.settings.autoSyncOnStartup = v; await p.saveData(p.settings); }));
+
+    new Setting(containerEl).setName(p.t('testAndSyncName')).setDesc(p.t('testAndSyncDesc'))
+      .addButton((b) => b.setButtonText(p.t('btnTestConn')).onClick(async () => { await p.testConnection(); }))
+      .addButton((b) => b.setButtonText(p.t('btnSyncNow')).setCta().onClick(async () => { await p.performSync(false); }))
+      .addButton((b) => b.setButtonText(p.t('btnShowLog')).onClick(() => { new LogModal(this.app, p).open(); }));
+
+    const stopSetting = new Setting(containerEl).setName(p.t('stopSyncName')).setDesc(p.isSyncing ? p.t('stopSyncDescRunning') : p.t('stopSyncDescIdle'));
+    stopSetting.addButton((b) => {
+      b.setButtonText(p.t('btnStopSync'));
+      try { b.buttonEl.style.background = '#c92a2a'; b.buttonEl.style.color = '#fff'; b.buttonEl.style.borderColor = '#c92a2a'; } catch (e) {}
+      b.onClick(() => { p.requestStop(); });
+    });
+
+    containerEl.createEl('h3', { text: p.t('secLiveLog') });
+    containerEl.createEl('p', { text: p.t('liveLogNote'), cls: 'ftp-sync-note' });
     const logBox = containerEl.createDiv({ cls: 'ftp-sync-log-box' });
     const pre = logBox.createEl('pre', { cls: 'ftp-sync-log' });
-    pre.setText(this.plugin.logs.join('\n') || 'هنوز لاگی وجود ندارد.');
-    // v1.3.3: اشتراک زنده — هر لاگ جدید خودش اینجا می‌آید
+    if (isEn) pre.style.direction = 'ltr';
+    pre.setText(p.logs.join('\n') || p.t('noLogsYet'));
+
     if (this._unsubLog) { try { this._unsubLog(); } catch (e) {} }
-    this._unsubLog = this.plugin.onLog((text) => { try { pre.setText(text); pre.scrollTop = pre.scrollHeight; } catch (e) {} });
+    this._unsubLog = p.onLog((text) => { try { pre.setText(text); pre.scrollTop = pre.scrollHeight; } catch (e) {} });
+
     const logActions = containerEl.createDiv({ cls: 'ftp-sync-log-actions' });
-    const clearBtn = logActions.createEl('button', { text: 'پاک کردن لاگ' });
-    clearBtn.onclick = async () => { this.plugin.logs = []; this.plugin.settings.logs = []; await this.plugin.saveData(this.plugin.settings); this.plugin._notifyLogListeners(); };
+    const clearBtn = logActions.createEl('button', { text: p.t('btnClearLog') });
+    clearBtn.onclick = async () => { p.logs = []; p.settings.logs = []; await p.saveData(p.settings); p._notifyLogListeners(); };
+
     const last = containerEl.createEl('p', { cls: 'ftp-sync-last' });
-    last.setText(this.plugin.settings.lastSync ? `آخرین سینک: ${new Date(this.plugin.settings.lastSync).toLocaleString('fa-IR')}` : 'هنوز سینکی انجام نشده است.');
-    containerEl.createEl('p', { text: 'نکته: نوار وضعیت پایین راست همیشه آخرین سینک را نشان می‌دهد و حین سینک درصد پیشرفت را نمایش می‌دهد.', cls: 'ftp-sync-note' });
+    last.setText(p.settings.lastSync ? p.t('lastSyncText', p.formatDate(p.settings.lastSync)) : p.t('neverSyncedText'));
+    containerEl.createEl('p', { text: p.t('bottomNote'), cls: 'ftp-sync-note' });
   }
   hide() {
-    // وقتی تنظیمات بسته شد، اشتراک لاگ را قطع کن تا حافظه نشت نکند
     if (this._unsubLog) { try { this._unsubLog(); } catch (e) {} this._unsubLog = null; }
     super.hide?.();
   }
