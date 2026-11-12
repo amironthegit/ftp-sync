@@ -724,7 +724,7 @@ class FTPSyncPlugin extends Plugin {
   }
   isExcluded(relPath, filePath) {
     const p = (filePath || relPath || '');
-    if (p === '.obsidian/plugins/ftp-sync' || p.startsWith('.obsidian/plugins/ftp-sync/')) return true;
+    if (p === '.obsidian/plugins/ftp-sync/data.json') return true;
     if (p === '.obsidian' || p.startsWith('.obsidian/')) return !this.settings.syncObsidian;
     if (p === '.trash' || p.startsWith('.trash/')) return !this.settings.syncTrash;
     return false;
