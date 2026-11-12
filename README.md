@@ -1,4 +1,4 @@
-# FTP Sync / Backup — Obsidian Plugin `v1.4.0`
+# FTP Sync / Backup — Obsidian Plugin `v1.5.0`
 >
 > - [English](#english)
 > - [فارسی](#فارسی)
